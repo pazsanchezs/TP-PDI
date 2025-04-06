@@ -1,55 +1,60 @@
-# -*- coding: utf-8 -*-
-"""Procesamiento y comparacion de metodos de ecualizacion de histograma en el dataset Exclusively Dark Image Dataset (exDARK)""" 
-
 import cv2
 import numpy as np
 import os
 import matplotlib.pyplot as plt
 from skimage.measure import shannon_entropy
-import time #para medir tiempos de ejecucion
+import time
+
+def ambe(image, reference_image):
+    """Cálculo del AMBE entre la imagen procesada y la original."""
+    return np.mean(np.abs(np.mean(image) - np.mean(reference_image)))
+
+def psnr(image, reference_image):
+    """Cálculo del PSNR (Peak Signal-to-Noise Ratio)."""
+    mse = np.mean((image - reference_image) ** 2)
+    if mse == 0:
+        return 100  # Sin error, PSNR muy alto
+    max_pixel = 255.0
+    return 20 * np.log10(max_pixel / np.sqrt(mse))
+
+def contrast(image):
+    """Cálculo del contraste como la desviación estándar de los píxeles."""
+    return np.std(image)
+
+def entropy(image):
+    """Cálculo de la entropía utilizando la función shannon_entropy."""
+    return shannon_entropy(image)
 
 def proposed_hist_equalization(image):
     """Implementación del método propuesto"""
-    # Convertir a escala de grises si es una imagen en color
     if len(image.shape) == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-     # Calcular histograma de la imagen 
     hist = cv2.calcHist([image], [0], None, [256], [0, 256])
-    # Calcular punto de separación (SP) usando la mediana (más robusta que la media)
     sp = int(np.median(image))
     
-    # Segmentar histograma en dos partes
-    # - his_l: valores menores o iguales al punto de separación
-    # - his_h: valores mayores al punto de separación
     his_l = hist[:sp + 1]
     his_h = hist[sp + 1:]
     
-    # Calcular límites de meseta (Plateau Limits) adaptativos:
-    # 1. Encontrar picos de cada sub-histograma
     pk_l, pk_h = np.max(his_l), np.max(his_h)
-    # 2. Calcular ratios de niveles de gris (GR)
-    #gr_l2: ratio para el histograma inferior
-    #gr_h2: ratio para el histograma superior
+    
     gr_l2 = (sp - np.mean(np.where(hist[:sp] > 0)[0])) / sp if sp > 0 else 0.5
     gr_h2 = (255 - np.mean(np.where(hist[sp:] > 0)[0]) - sp) / (255 - sp) if (255 - sp) > 0 else 0.5
-    # 3. Calcular límites de meseta usando fórmula adaptativa
+    
     pl_l = (0.15 + 0.35 * gr_l2) * pk_l
     pl_h = (0.15 + 0.35 * gr_h2) * pk_h
     
-    # Aplicar clipping mejorado usando raíz cuadrada para preservar mejor los detalles
-    his_l_clipped = np.where(his_l > pl_l, pl_l + np.sqrt(his_l - pl_l), his_l)
-    his_h_clipped = np.where(his_h > pl_h, pl_h + np.sqrt(his_h - pl_h), his_h)
+    his_l_clipped = np.where(his_l > pl_l, pl_l + np.sqrt(np.maximum(his_l - pl_l, 0)), his_l)
+    his_h_clipped = np.where(his_h > pl_h, pl_h + np.sqrt(np.maximum(his_h - pl_h, 0)), his_h)
+
     
-    # Función interna para ecualizar sub-histogramas
     def equalize_sub_hist(sub_hist, sub_min, sub_max):
-        cdf = sub_hist.cumsum()  # Función de distribución acumulativa
+        cdf = sub_hist.cumsum()
         cdf_normalized = (cdf - cdf.min()) * (sub_max - sub_min) / (cdf.max() - cdf.min() + 1e-6)
         return cdf_normalized.astype('uint8')
-    # Ecualizar ambos sub-histogramas por separado
+    
     cdf_l = equalize_sub_hist(his_l_clipped, 0, sp)
     cdf_h = equalize_sub_hist(his_h_clipped, sp + 1, 255)
     
-    #Aplicar la transformación a la imagen original
     equalized_image = np.zeros_like(image)
     for i in range(256):
         if i <= sp and i < len(cdf_l):
@@ -61,45 +66,39 @@ def proposed_hist_equalization(image):
 
 def process_image(image_path, output_dir, img_name):
     """ Procesa una imagen individual aplicando los tres métodos de ecualización
-   y calculando las métricas correspondientes."""
+    y calculando las métricas correspondientes."""
     try:
-        # Leer imagen manteniendo el color si es necesario
         image = cv2.imread(image_path)
         if image is None:
             print(f"Error: No se pudo leer {img_name}")
             return None
         
-        # Convertir a escala de grises para procesamiento
         if len(image.shape) == 3:
             gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray_image = image.copy()
         
-       # Aplicar los tres métodos de ecualización:
-        # 1. HE (Histogram Equalization) estándar
-        # 2. CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        # 3. Nuestro método propuesto
         methods = {
             'HE': cv2.equalizeHist(gray_image),
             'CLAHE': cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray_image),
             'Proposed': proposed_hist_equalization(gray_image)
         }
         
-       # Calcular métricas para la imagen original y cada método aplicado
         metrics = {'Original': {
-            'Brightness': np.mean(gray_image),
-            'Contrast': np.std(gray_image),
-            'Entropy': shannon_entropy(gray_image)
+            'Contraste': contrast(gray_image),
+            'Entropia': entropy(gray_image),
+            'AMBE': 0.0,  # AMBE no se calcula para la imagen original
+            'PSNR': 100  # PSNR es máximo para la imagen original
         }}
-        # Agregar métricas para cada método
+        
         for name, result in methods.items():
             metrics[name] = {
-                'Brightness': np.mean(result),
-                'Contrast': np.std(result),
-                'Entropy': shannon_entropy(result)
+                'Contraste': contrast(result),
+                'Entropia': entropy(result),
+                'AMBE': ambe(result, gray_image),
+                'PSNR': psnr(result, gray_image)
             }
         
-        # Guardar resultados
         base_name = os.path.splitext(img_name)[0]
         output_paths = {
             'original': os.path.join(output_dir, 'images', f'{base_name}_original.png'),
@@ -109,12 +108,10 @@ def process_image(image_path, output_dir, img_name):
             'plot': os.path.join(output_dir, 'plots', f'{base_name}_comparison.png')
         }
         
-        # Guardar imágenes
         cv2.imwrite(output_paths['original'], gray_image)
         for name in methods:
             cv2.imwrite(output_paths[name], methods[name])
         
-        # Generar gráfico comparativo
         plt.figure(figsize=(18, 9))
         titles = ['Original', 'HE Estándar', 'CLAHE', 'Algoritmo Propuesto']
         
@@ -140,17 +137,9 @@ def process_image(image_path, output_dir, img_name):
         return None
 
 def main():
-    """
-    Función principal que:
-    1. Busca imágenes en el dataset
-    2. Procesa cada imagen
-    3. Calcula métricas globales
-    4. Guarda resultados
-    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
     dataset_root = os.path.join(script_dir, "Exclusively-Dark-Image-Dataset-master")
     
-    # Buscar imágenes en todas las subcarpetas relevantes
     image_extensions = ('.jpg', '.jpeg', '.png')
     image_paths = []
     
@@ -166,13 +155,11 @@ def main():
         print("Las imágenes deben estar en carpetas llamadas 'Dataset' o 'Low'")
         return
     
-    # Configurar directorio de salida
     output_dir = os.path.join(script_dir, "exdark_results")
     os.makedirs(os.path.join(output_dir, 'images'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'plots'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'metrics'), exist_ok=True)
     
-    # Procesar imágenes
     all_metrics = []
     print(f"\nIniciando procesamiento de {len(image_paths)} imágenes...")
     
@@ -183,7 +170,6 @@ def main():
         if metrics:
             all_metrics.append(metrics)
             
-            # Guardar métricas individuales
             with open(os.path.join(output_dir, 'metrics', f'metrics_{i}.txt'), 'w') as f:
                 for method, values in metrics.items():
                     f.write(f"{method}:\n")
@@ -194,16 +180,15 @@ def main():
             if i % 10 == 0 or i == len(image_paths):
                 print(f"Procesadas {i}/{len(image_paths)} imágenes...")
     
-    # Calcular y mostrar métricas promedio
     if all_metrics:
         methods = ['HE', 'CLAHE', 'Proposed']
         avg_metrics = {method: {
-            'Brightness': np.mean([m[method]['Brightness'] for m in all_metrics]),
-            'Contrast': np.mean([m[method]['Contrast'] for m in all_metrics]),
-            'Entropy': np.mean([m[method]['Entropy'] for m in all_metrics])
+            'Contraste': np.mean([m[method]['Contraste'] for m in all_metrics]),
+            'Entropia': np.mean([m[method]['Entropia'] for m in all_metrics]),
+            'AMBE': np.mean([m[method]['AMBE'] for m in all_metrics]),
+            'PSNR': np.mean([m[method]['PSNR'] for m in all_metrics])
         } for method in methods}
         
-        # Guardar métricas promedio
         with open(os.path.join(output_dir, 'average_metrics.txt'), 'w') as f:
             f.write("Métricas Promedio:\n\n")
             f.write(f"Número de imágenes procesadas: {len(all_metrics)}\n\n")
@@ -219,7 +204,6 @@ def main():
                     f.write(f"  {k}: {v:.2f}\n")
                 f.write("\n")
         
-        # Mostrar resumen
         print("\n" + "="*50)
         print("RESUMEN DE MÉTRICAS PROMEDIO")
         print("="*50)
